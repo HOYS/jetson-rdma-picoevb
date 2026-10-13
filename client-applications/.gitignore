@@ -3,3 +3,4 @@ rdma-malloc
 rdma-malloc-c2h-perf
 rdma-malloc-h2c-perf
 set-leds
+rdma-cuda-c2h-verify

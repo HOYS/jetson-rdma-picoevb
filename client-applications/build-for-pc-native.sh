@@ -21,4 +21,8 @@
 # DEALINGS IN THE SOFTWARE.
 
 export NV_BUILD_DGPU=1
+# Build for the installed GPU(s) if nvcc supports it (CUDA 11.6+)
+if [ -z "${NVCCFLAGS}" ] && /usr/local/cuda/bin/nvcc --help 2>/dev/null | grep -q -- "-arch=native"; then
+	export NVCCFLAGS="-arch=native"
+fi
 exec make

@@ -23,12 +23,16 @@ ifeq ($(CUDA_TOOLKIT),)
 	CUDA_TOOLKIT := $(wildcard /usr/local/cuda)
 endif
 ifeq ($(CUDA_TOOLKIT),)
+	CUDA_TOOLKIT := $(wildcard /usr/local/cuda-11.4)
+endif
+ifeq ($(CUDA_TOOLKIT),)
 	CUDA_TOOLKIT := $(wildcard /usr/local/cuda-10.1)
 endif
 ifeq ($(CUDA_TOOLKIT),)
 	CUDA_TOOLKIT := $(wildcard /usr/local/cuda-10.0)
 endif
 NVCC ?= $(CUDA_TOOLKIT)/bin/nvcc
+NVCCFLAGS ?=
 
 CFLAGS := \
 	-ggdb
@@ -41,6 +45,7 @@ TARGETS :=
 TARGETS += rdma-cuda
 TARGETS += rdma-cuda-c2h-perf
 TARGETS += rdma-cuda-h2c-perf
+TARGETS += rdma-cuda-c2h-verify
 TARGETS += rdma-malloc
 TARGETS += rdma-malloc-c2h-perf
 TARGETS += rdma-malloc-h2c-perf
@@ -48,7 +53,7 @@ TARGETS += set-leds
 default: $(TARGETS)
 
 %: %.cu ../kernel-module/picoevb-rdma-ioctl.h Makefile
-	$(NVCC) $(addprefix -Xcompiler ,$(CFLAGS)) -o $@ $< -l cuda
+	$(NVCC) $(NVCCFLAGS) $(addprefix -Xcompiler ,$(CFLAGS)) -o $@ $< -l cuda
 
 rdma-malloc%: rdma-malloc%.c ../kernel-module/picoevb-rdma-ioctl.h Makefile
 	$(CC) $(CFLAGS) -o $@ $<

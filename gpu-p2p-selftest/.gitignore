@@ -1,0 +1,9 @@
+.*.cmd
+*.ko
+*.mod
+*.mod.*
+*.o
+modules.order
+Module.symvers
+nvidia.symvers
+p2p-selftest-run
