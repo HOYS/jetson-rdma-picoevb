@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Acorn-to-A5000 Radar Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one data path drawn as a snake (FPGA row L->R, PCIe drop, GPU row R->L,
+   host row L->R), collapsing to a single ordered column on narrow screens. */
+:root {
+  --bg: #f3f5f4;
+  --panel: #ffffff;
+  --ink: #16211d;
+  --muted: #5d6b66;
+  --line: #d5dcd9;
+  --fpga: #b4690e;
+  --link: #2f6f8f;
+  --gpu: #2c8a55;
+  --host: #6a5a9a;
+  --fpga-wash: #fbf1e3;
+  --link-wash: #e6f0f5;
+  --gpu-wash: #e5f3ea;
+  --host-wash: #efecf6;
+  --gra: #b0396b;
+  --gra-wash: #f8eaf0;
+  --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --body: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1513; --panel: #161e1b; --ink: #e2ebe7; --muted: #93a39d; --line: #2a3632;
+    --fpga: #f0a24a; --link: #6db6d8; --gpu: #5fd08f; --host: #a99ae0;
+    --fpga-wash: #2a2014; --link-wash: #14242c; --gpu-wash: #13261b; --host-wash: #1f1c2c;
+    --gra: #ef7aa8; --gra-wash: #2a1520;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1513; --panel: #161e1b; --ink: #e2ebe7; --muted: #93a39d; --line: #2a3632;
+  --fpga: #f0a24a; --link: #6db6d8; --gpu: #5fd08f; --host: #a99ae0;
+  --fpga-wash: #2a2014; --link-wash: #14242c; --gpu-wash: #13261b; --host-wash: #1f1c2c;
+  --gra: #ef7aa8; --gra-wash: #2a1520;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 var(--body);
+  margin: 0;
+}
+.wrap {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding-inline: 20px;
+  padding-block: 28px 48px;
+  display: grid;
+  gap: 22px;
+}
+header { display: grid; gap: 6px; }
+h1 {
+  font: 700 clamp(30px, 4.4vw, 46px)/1.02 var(--display);
+  letter-spacing: .01em;
+  margin: 0;
+  text-wrap: balance;
+}
+.lede { color: var(--muted); max-width: 70ch; margin: 0; }
+.figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--muted);
+  padding-top: 4px;
+}
+.figures b { color: var(--ink); font-weight: 500; }
+
+/* ---------------------------------------------------------------- lanes */
+.lane {
+  border-radius: 12px;
+  padding: 14px 14px 16px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.lane.fpga { background: var(--fpga-wash); --c: var(--fpga); }
+.lane.gpu { background: var(--gpu-wash); --c: var(--gpu); }
+.lane.host { background: var(--host-wash); --c: var(--host); }
+.lane-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+}
+.lane-head h2 {
+  font: 600 22px/1 var(--display);
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--c);
+  margin: 0;
+}
+.lane-head span { color: var(--muted); font-size: 13px; }
+.row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+.row.rev { flex-direction: row-reverse; }
+.stage {
+  flex: 1 1 0;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--c);
+  border-radius: 8px;
+  padding: 10px 11px 11px;
+  display: grid;
+  align-content: start;
+  gap: 4px;
+}
+.stage h3 {
+  font: 600 18px/1.1 var(--display);
+  letter-spacing: .02em;
+  margin: 0;
+}
+.stage p { margin: 0; font-size: 13px; color: var(--muted); }
+.stage .spec {
+  font: 12px/1.45 var(--mono);
+  color: var(--ink);
+}
+.stage.key { border-color: var(--c); box-shadow: 0 0 0 1px var(--c) inset; }
+.arrow {
+  flex: 0 0 26px;
+  display: grid;
+  place-items: center;
+  color: var(--c);
+}
+.arrow svg { width: 20px; height: 20px; }
+.row.rev .arrow svg { transform: rotate(180deg); }
+.note {
+  font-size: 12.5px;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.note::before {
+  content: "";
+  flex: 0 0 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--c);
+  opacity: .6;
+  transform: translateY(1px);
+}
+
+/* ------------------------------------------------------ drops between lanes */
+.drop {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 16px;
+}
+.drop.left { grid-template-columns: auto 1fr; }
+.drop .pipe {
+  width: 120px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  color: var(--c);
+}
+.drop .pipe svg { width: 100%; height: 100%; overflow: visible; }
+.drop .label {
+  font-size: 13px;
+  color: var(--muted);
+  min-width: 0;
+}
+.drop .label strong {
+  display: block;
+  font: 600 20px/1.1 var(--display);
+  letter-spacing: .03em;
+  color: var(--c);
+  text-transform: uppercase;
+}
+.drop .label .spec { font: 12.5px/1.5 var(--mono); color: var(--ink); }
+.drop.link { --c: var(--link); }
+.drop.result { --c: var(--gpu); }
+.drop.left .label { order: 2; }
+.drop:not(.left) .label { text-align: right; }
+
+/* ---------------------------------------------------------- control path */
+.control {
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+  --c: var(--host);
+}
+.control h2 {
+  font: 600 20px/1 var(--display);
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  margin: 0;
+}
+.control > p { margin: 0; color: var(--muted); font-size: 13px; }
+.ctl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+.ctl .stage { border-top-style: dashed; }
+
+/* ------------------------------------------------- AMS GRA (planned) */
+.role {
+  font: 500 11.5px/1 var(--mono);
+  letter-spacing: .02em;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px dashed var(--c);
+  color: var(--c);
+  margin-left: auto;
+  white-space: nowrap;
+}
+.stage.planned {
+  border-style: dashed;
+  border-top-style: dashed;
+  background: transparent;
+}
+.tag {
+  justify-self: start;
+  font: 500 10.5px/1 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--c);
+  color: var(--bg);
+}
+.boundary {
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: 1px dashed var(--gra);
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 13px;
+}
+.boundary b { color: var(--gra); font-weight: 600; }
+.gra {
+  --c: var(--gra);
+  background: var(--gra-wash);
+  border-radius: 12px;
+  padding: 16px 14px 18px;
+  display: grid;
+  gap: 14px;
+}
+.gra h2 {
+  font: 700 26px/1 var(--display);
+  letter-spacing: .02em;
+  margin: 0;
+  color: var(--gra);
+  text-transform: uppercase;
+}
+.gra > p { margin: 0; color: var(--muted); max-width: 80ch; font-size: 14px; }
+.gra .row .stage { --c: var(--gra); }
+.gra .row .stage.ours { --c: var(--gpu); }
+.steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+.steps .stage { --c: var(--gra); }
+.steps .stage h3 { display: flex; gap: 8px; align-items: baseline; }
+.steps .stage h3 span {
+  font: 600 13px/1 var(--mono);
+  color: var(--gra);
+}
+.caveat {
+  border-left: 3px solid var(--gra);
+  padding: 4px 0 4px 12px;
+  font-size: 13.5px;
+  color: var(--ink);
+  max-width: 90ch;
+}
+.caveat b { font-weight: 600; }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+
+/* -------------------------------------------------------- narrow screens */
+@media (max-width: 860px) {
+  .row, .row.rev { flex-direction: column; }
+  .arrow { flex-basis: 24px; }
+  .arrow svg, .row.rev .arrow svg { transform: rotate(90deg); }
+  .drop, .drop.left { grid-template-columns: 1fr; justify-items: center; text-align: center; }
+  .drop .label, .drop:not(.left) .label { text-align: center; order: 2; }
+  .drop .pipe { order: 1; height: 54px; }
+}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Acorn-to-A5000 Radar Pipeline</h1>
+    <p class="lede">Simulated radar IQ samples leave the FPGA, cross PCIe straight into GPU memory, and come out as detections a fraction of a millisecond later. Figures are as measured on the test rig at the link's limit. Dashed outlines and pink tags show the planned integration with the AMS GRA RF MEL standard.</p>
+    <div class="figures">
+      <span><b>375 MS/s</b> 16-bit IQ</span>
+      <span><b>1.50 GB/s</b> sustained</span>
+      <span><b>716</b> CPIs per second</span>
+      <span><b>0.14 ms</b> CPI in GPU &rarr; detections</span>
+      <span><b>0</b> samples lost in a 60 s soak</span>
+      <span><b>100%</b> of targets detected</span>
+    </div>
+  </header>
+
+  <!-- FPGA -->
+  <section class="lane fpga" aria-label="FPGA">
+    <div class="lane-head">
+      <h2>FPGA</h2>
+      <span>SQRL Acorn CLE-215+ &middot; Xilinx Artix-7 XC7A200T, in an M.2 slot</span>
+      <span class="role" style="--c:var(--gra)">AMS GRA: RF sensor (MFA)</span>
+    </div>
+    <div class="row">
+      <div class="stage">
+        <h3>IQ generator</h3>
+        <p>Emulates an ADC and DDC: LFM chirp echoes from two targets, plus noise.</p>
+        <div class="spec">16-bit I + 16-bit Q<br>4 samples per 128-bit word<br>375 MS/s (up to 500)</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage">
+        <h3>RAM ring</h3>
+        <p>Block RAM written by the generator, read by the DMA engine.</p>
+        <div class="spec">1 MiB = 65,536 words<br>~0.7 ms of samples</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage key">
+        <h3>DMA pacing gate</h3>
+        <p>Holds each of the engine's read bursts until the generator has written that data, and counts what it has read.</p>
+        <div class="spec">overflow counter = samples lost</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage">
+        <h3>XDMA engine</h3>
+        <p>Runs a circular descriptor list: copies the ring into the GPU buffers in order, forever.</p>
+        <div class="spec">card-to-host (C2H) channel<br>no per-transfer host work</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="stage planned" style="--c:var(--gra)">
+        <span class="tag">Planned &middot; optional</span>
+        <h3>AMS VITA 49.2 packetizer</h3>
+        <p>Frame the stream as Base Set signal data packets: stream ID, picosecond timestamp of the first sample, and a trailer whose sample-loss bit reports ring overflows. 32 KiB packets carry 8,184 IQ samples each for 0.1% overhead.</p>
+        <div class="spec">JobDataFormat::AMSVitaExtraLarge &middot; payload format 0x200003CF (complex int16)</div>
+      </div>
+    </div>
+    <div class="note">A link watchdog re-resets the PCIe core if the link isn't up ~260 ms after reset, so a cold boot still trains at x4.</div>
+  </section>
+
+  <div class="drop link">
+    <div class="label">
+      <strong>PCIe Gen2 x4 &middot; GPUDirect RDMA</strong>
+      <span class="spec">5 GT/s &times; 4 lanes &middot; 1.50 GB/s sustained</span><br>
+      Peer-to-peer writes into the GPU's 32 GB BAR. Sample data never touches host RAM or the CPU.
+      <div class="boundary"><b>Planned RF MEL boundary.</b> The skill calls <code>DataMEL::createProductRxEndpoint(ComplexINT16, size, gpuBuffer)</code>; the standard explicitly allows <code>cudaMalloc</code> memory with RDMA transport, which is this link. The sensor side ends here.</div>
+    </div>
+    <div class="pipe" aria-hidden="true">
+      <svg viewBox="0 0 120 64"><path d="M60 0v52" stroke="currentColor" stroke-width="10" stroke-linecap="butt"/><path d="M44 44l16 18 16-18" fill="currentColor"/></svg>
+    </div>
+  </div>
+
+  <!-- GPU (reads right to left) -->
+  <section class="lane gpu" aria-label="GPU">
+    <div class="lane-head">
+      <h2>GPU</h2>
+      <span>NVIDIA RTX A5000 &middot; one CPI = 4,096 range samples &times; 128 pulses (2 MiB, 1.40 ms of data)</span>
+      <span class="role" style="--c:var(--gra)">AMS GRA: radar skill</span>
+    </div>
+    <div class="row rev">
+      <div class="stage">
+        <h3>CPI buffers</h3>
+        <p>A ring of three pinned 2 MiB buffers the DMA fills in turn.</p>
+        <div class="spec">int16 IQ, pulse-major</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage">
+        <h3>Convert</h3>
+        <p>Integer samples to complex float.</p>
+        <div class="spec">int16 &rarr; float32</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage">
+        <h3>Pulse compression</h3>
+        <p>Matched filter in the frequency domain, per pulse.</p>
+        <div class="spec">4096-pt FFT &rarr; &times; chirp spectrum &rarr; IFFT<br>512-sample LFM, Hamming</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage">
+        <h3>Doppler processing</h3>
+        <p>Corner turn to range-major, window, FFT across pulses.</p>
+        <div class="spec">Hamming &middot; 128-pt FFT<br>per range bin</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage">
+        <h3>CFAR detection</h3>
+        <p>Power and cell-averaging CFAR fused in one shared-memory kernel.</p>
+        <div class="spec">guard 2, train 16 each side<br>P<sub>fa</sub> 10<sup>&minus;6</sup></div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage key">
+        <h3>Detections</h3>
+        <p>Range bin, Doppler bin and SNR of every threshold crossing.</p>
+        <div class="spec">~48 dB processing gain<br>echo &minus;6 dB in raw IQ &rarr; +27&ndash;37 dB</div>
+      </div>
+    </div>
+    <div class="note">The GPU pipeline alone sustains about 6.5 GS/s, so at 375 MS/s it is idle most of the time.</div>
+  </section>
+
+  <div class="drop result left">
+    <div class="pipe" aria-hidden="true">
+      <svg viewBox="0 0 120 64"><path d="M60 0v52" stroke="currentColor" stroke-width="4"/><path d="M50 46l10 14 10-14" fill="currentColor"/></svg>
+    </div>
+    <div class="label">
+      <strong>Detections to the host</strong>
+      <span class="spec">a few hundred bytes per CPI</span><br>
+      Plus, 15 times a second, a 512 &times; 128 range-Doppler thumbnail and a slice of raw IQ for the dashboard.
+    </div>
+  </div>
+
+  <!-- Host -->
+  <section class="lane host" aria-label="Host">
+    <div class="lane-head">
+      <h2>Host and dashboard</h2>
+      <span>Intel Core i9-12900K &middot; Linux 6.8 &middot; viewed from any browser on the LAN</span>
+      <span class="role" style="--c:var(--gra)">AMS GRA: skill outputs</span>
+    </div>
+    <div class="row">
+      <div class="stage">
+        <h3>Scoring</h3>
+        <p>Each CPI's detections are matched against where the targets really were when it was generated.</p>
+        <div class="spec">276,266 of 276,266 CPIs: both found</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage">
+        <h3>Telemetry thread</h3>
+        <p>Packs a frame as JSON and sends it on; drops frames rather than ever slowing the real-time loop.</p>
+        <div class="spec">TCP 127.0.0.1:7700</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage">
+        <h3>Dashboard server</h3>
+        <p>Python standard library; each browser asks for the next frame in turn.</p>
+        <div class="spec">http://&lt;host&gt;:8080</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage key">
+        <h3>Browser</h3>
+        <p>Range-Doppler map, raw IQ, range profiles, detection rates and tracks.</p>
+        <div class="spec">15 frames/s</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="stage planned" style="--c:var(--gra)">
+        <span class="tag">Planned</span>
+        <h3>UCI detection reports</h3>
+        <p>Publish each CPI's detections as UCI messages over OMS, the way the reference <code>rf-fm-demod</code> skill publishes <code>SignalReport</code>, so they show up in Worldview next to the scenario's truth.</p>
+        <div class="spec">UCI over OWP</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Control path -->
+  <section class="control" aria-label="Control path">
+    <h2>Control path</h2>
+    <p>These run on the host CPU and steer the data path above, but no sample data passes through them.</p>
+    <div class="ctl">
+      <div class="stage">
+        <h3>picoevb-rdma driver</h3>
+        <p>Pins the GPU buffers for peer access, builds the circular descriptor list in host memory and starts the engine. Stops it if the program exits or the GPU memory is freed.</p>
+        <div class="spec">C2H_STREAM_START / STATUS / STOP</div>
+      </div>
+      <div class="stage">
+        <h3>Real-time loop</h3>
+        <p>Checks how many descriptors the engine has completed, and launches each CPI on the GPU once its buffer is full.</p>
+        <div class="spec">SCHED_FIFO on one core<br>polls every 20 &micro;s</div>
+      </div>
+      <div class="stage">
+        <h3>Generator registers</h3>
+        <p>Set the sample rate, noise and targets; with target motion on, ranges are rewritten between CPIs.</p>
+        <div class="spec">BAR0 + 0x1000, memory-mapped</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- AMS GRA integration -->
+  <section class="gra" aria-label="AMS GRA integration">
+    <h2>Planned: AMS GRA integration</h2>
+    <p>The Agile Mission Suite Government Reference Architecture splits a mission system into sensors, which expose hardware through the RF MEL C++ API (<code>librf_mel.so</code>), and skills, which consume that data and publish UCI reports. Its starter kit adds an environment simulator (Supercell) flying an ownship and two bandit aircraft over Kitty Hawk, NC, and a 3D viewer (Worldview). Our rig can fill both the sensor and the skill roles, with the FPGA echoing the simulated aircraft.</p>
+
+    <div class="row">
+      <div class="stage">
+        <h3>Supercell</h3>
+        <p>Scenario truth: ownship and bandit positions and velocities.</p>
+        <div class="spec">environment simulation</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage ours">
+        <h3>Acorn FPGA as target simulator</h3>
+        <p>Geometry becomes echo delay, Doppler step and amplitude in the generator's target registers.</p>
+        <div class="spec">range &rarr; T_DELAY &middot; radial velocity &rarr; T_DINC</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage ours">
+        <h3>Our RF MEL sensor</h3>
+        <p>Job requests program the waveform; receive endpoints get IQ by GPUDirect RDMA; a callback per CPI carries the standard metadata.</p>
+        <div class="spec">librf_mel.so over picoevb-rdma</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage ours">
+        <h3>Our radar skill</h3>
+        <p>The GPU pipeline above, fed through <code>ProductRxEndpoint</code> like any AMS GRA RF skill.</p>
+        <div class="spec">ComplexINT16 callback path</div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2 10h13M10 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+      <div class="stage">
+        <h3>Worldview</h3>
+        <p>3D view of detected aircraft against the scenario's truth.</p>
+        <div class="spec">UCI reports over OMS</div>
+      </div>
+    </div>
+
+    <div class="steps">
+      <div class="stage planned">
+        <h3><span>1</span>Acorn + GPU as an RF MEL sensor</h3>
+        <p>Implement <code>DataMEL</code> and <code>C2MEL</code> on our driver, shaped after the reference Squall sensor. Any AMS GRA RF skill can then read our hardware.</p>
+      </div>
+      <div class="stage planned">
+        <h3><span>2</span>Radar processing as a skill</h3>
+        <p>Wrap the GPU pipeline as a skill on the <code>ProductRxEndpoint</code> callback path, publishing detections as UCI messages. Template: <code>rf-fm-demod</code>.</p>
+      </div>
+      <div class="stage planned">
+        <h3><span>3</span>Scenario-driven targets</h3>
+        <p>Feed bandit range and radial velocity relative to the ownship into the FPGA, making it a hardware-in-the-loop radar target simulator.</p>
+      </div>
+      <div class="stage planned">
+        <h3><span>4</span>VITA 49.2 framing <em style="font-weight:400;color:var(--muted)">(optional)</em></h3>
+        <p>Packetize in the FPGA as a real AMS sensor would, with timestamps and sample-loss flags in every packet.</p>
+      </div>
+    </div>
+
+    <div class="caveat"><b>Open question: waveform.</b> At 375 MS/s a range bin is 0.4 m, so 4,096 bins reach only about 1.6 km. Aircraft at tactical ranges need a lower rate (25 MS/s gives 6 m bins out to about 24 km), but at an X-band carrier that pulse rate only covers about &plusmn;46 m/s unambiguously, too slow for jets. That calls for a deliberate waveform choice or Doppler ambiguity resolution.</div>
+  </section>
+
+  <div class="legend">
+    <span><span class="sw" style="background:var(--fpga)"></span>FPGA logic</span>
+    <span><span class="sw" style="background:var(--link)"></span>PCIe link</span>
+    <span><span class="sw" style="background:var(--gpu)"></span>GPU kernels</span>
+    <span><span class="sw" style="background:var(--host)"></span>Host software</span>
+    <span><span class="sw" style="background:var(--gra)"></span>Planned AMS GRA integration (dashed)</span>
+    <span>Solid outlined stages: the pieces that make lossless streaming work.</span>
+  </div>
+</div>
+
+</body>
+</html>
