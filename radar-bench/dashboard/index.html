@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radar Pipeline Live</title>
+<style>
+:root {
+  --bg: #0b0f14;
+  --panel: #121820;
+  --edge: #1f2a36;
+  --text: #d7e0ea;
+  --muted: #7d8b9a;
+  --good: #3ddc84;
+  --bad: #ff5c5c;
+  --warn: #ffb547;
+  --a: #ff8a3d;
+  --b: #4fb3ff;
+  --i: #6fd3ff;
+  --q: #ffb86b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 16px 6px;
+}
+h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.sub { color: var(--muted); font-size: 13px; }
+.pill {
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #2a3340;
+  color: var(--muted);
+}
+.pill.live { background: rgba(61, 220, 132, .15); color: var(--good); }
+.pill.idle { background: rgba(255, 181, 71, .15); color: var(--warn); }
+main {
+  display: grid;
+  gap: 12px;
+  padding: 8px 16px 16px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.card h2 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.card .note { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.stats {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+.stat {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.stat .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.stat .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat .s { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.v.good { color: var(--good); }
+.v.bad { color: var(--bad); }
+.span8 { grid-column: span 8; }
+.span4 { grid-column: span 4; }
+.span6 { grid-column: span 6; }
+.span3 { grid-column: span 3; }
+canvas { display: block; width: 100%; }
+#rd { height: 340px; }
+#prof, #iq { height: 220px; }
+#con { height: 220px; }
+#hr, #hd { height: 220px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
+th, td { text-align: right; padding: 3px 6px; border-bottom: 1px solid var(--edge); }
+th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+td.tag { text-align: left; font-weight: 600; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+@media (max-width: 1100px) {
+  .span8, .span4, .span6, .span3 { grid-column: 1 / -1; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>FPGA &rarr; GPUDirect RDMA &rarr; GPU radar pipeline</h1>
+  <span class="sub" id="cfg">waiting for data&hellip;</span>
+  <span class="pill" id="state">connecting</span>
+</header>
+<main>
+  <section class="stats" id="stats"></section>
+
+  <section class="card span8">
+    <h2>Range&ndash;Doppler map (one CPI, after pulse compression + Doppler FFT)</h2>
+    <canvas id="rd"></canvas>
+    <div class="legend">
+      <span><span class="sw" style="background:transparent;border:2px solid #fff"></span>true target position</span>
+      <span><span class="sw" style="background:#ff3df5"></span>CFAR detection</span>
+      <span>colour: power, dB above the noise floor</span>
+    </div>
+  </section>
+
+  <section class="card span4">
+    <h2>Detections in this CPI</h2>
+    <table>
+      <thead><tr><th style="text-align:left">match</th><th>range</th><th>Doppler</th><th>SNR dB</th></tr></thead>
+      <tbody id="dets"></tbody>
+    </table>
+    <div class="note" id="detnote"></div>
+  </section>
+
+  <section class="card span6">
+    <h2>Range profile at each target's Doppler bin</h2>
+    <canvas id="prof"></canvas>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--a)"></span>target A Doppler bin</span>
+      <span><span class="sw" style="background:var(--b)"></span>target B Doppler bin</span>
+    </div>
+  </section>
+
+  <section class="card span6">
+    <h2>Raw IQ from the FPGA (first pulse of the CPI)</h2>
+    <canvas id="iq"></canvas>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--i)"></span>I</span>
+      <span><span class="sw" style="background:var(--q)"></span>Q</span>
+      <span><span class="sw" style="background:rgba(255,138,61,.35)"></span>where target A's echo is</span>
+    </div>
+    <div class="note" id="iqnote"></div>
+  </section>
+
+  <section class="card span3">
+    <h2>IQ constellation</h2>
+    <canvas id="con"></canvas>
+    <div class="note">Circles: noise &sigma; (grey) and target A amplitude (orange).</div>
+  </section>
+
+  <section class="card span3">
+    <h2>Detection rate</h2>
+    <canvas id="rate" style="height:220px"></canvas>
+    <div class="note">Share of recent CPIs in which each target was detected.</div>
+  </section>
+
+  <section class="card span6">
+    <h2>Detections over time: range</h2>
+    <canvas id="hr"></canvas>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--a)"></span>matches target A</span>
+      <span><span class="sw" style="background:var(--b)"></span>matches target B</span>
+      <span><span class="sw" style="background:#8a96a3"></span>other</span>
+      <span>lines: true ranges</span>
+    </div>
+  </section>
+
+  <section class="card span6">
+    <h2>Detections over time: Doppler</h2>
+    <canvas id="hd"></canvas>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const HISTORY_S = 60;
+
+/* Turbo colour map (polynomial approximation) */
+const LUT = new Uint8ClampedArray(256 * 3);
+for (let k = 0; k < 256; k++) {
+  const x = k / 255;
+  const r = 0.13572138 + x * (4.61539260 + x * (-42.66032258 + x * (132.13108234 + x * (-152.94239396 + x * 59.28637943))));
+  const g = 0.09140261 + x * (2.19418839 + x * (4.84296658 + x * (-14.18503333 + x * (4.27729857 + x * 2.82956604))));
+  const b = 0.10667330 + x * (12.64194608 + x * (-60.58204836 + x * (110.36276771 + x * (-89.90310912 + x * 27.34824973))));
+  LUT[k * 3] = r * 255; LUT[k * 3 + 1] = g * 255; LUT[k * 3 + 2] = b * 255;
+}
+
+const css = getComputedStyle(document.documentElement);
+const C = (n) => css.getPropertyValue(n).trim();
+const COL = { a: C("--a"), b: C("--b"), i: C("--i"), q: C("--q"), muted: C("--muted"),
+  edge: C("--edge"), text: C("--text"), good: C("--good"), bad: C("--bad") };
+
+function fit(cv) {
+  const r = cv.getBoundingClientRect();
+  const d = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  return { ctx, w: r.width, h: r.height };
+}
+
+/* Plot frame with axes; returns mapping functions */
+function axes(ctx, w, h, x0, x1, y0, y1, xlabel, ylabel, opts = {}) {
+  const L = 48, R = 10, T = 8, B = 30;
+  const pw = w - L - R, ph = h - T - B;
+  const X = (v) => L + (v - x0) / (x1 - x0) * pw;
+  const Y = (v) => T + (1 - (v - y0) / (y1 - y0)) * ph;
+  ctx.clearRect(0, 0, w, h);
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.strokeStyle = COL.edge;
+  ctx.fillStyle = COL.muted;
+  ctx.lineWidth = 1;
+  const ticks = (a, b, n) => {
+    const step = Math.pow(10, Math.floor(Math.log10((b - a) / n)));
+    const m = [1, 2, 5, 10].find((k) => (b - a) / (k * step) <= n) * step;
+    const out = [];
+    for (let v = Math.ceil(a / m) * m; v <= b + 1e-9; v += m) out.push(+v.toFixed(6));
+    return out;
+  };
+  ctx.textAlign = "center";
+  for (const v of ticks(x0, x1, opts.xt || 8)) {
+    ctx.beginPath(); ctx.moveTo(X(v), T); ctx.lineTo(X(v), T + ph); ctx.stroke();
+    ctx.fillText(opts.xfmt ? opts.xfmt(v) : v, X(v), T + ph + 13);
+  }
+  ctx.textAlign = "right";
+  for (const v of ticks(y0, y1, opts.yt || 5)) {
+    ctx.beginPath(); ctx.moveTo(L, Y(v)); ctx.lineTo(L + pw, Y(v)); ctx.stroke();
+    ctx.fillText(v, L - 5, Y(v) + 4);
+  }
+  ctx.textAlign = "center";
+  ctx.fillText(xlabel, L + pw / 2, h - 3);
+  ctx.save(); ctx.translate(11, T + ph / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText(ylabel, 0, 0); ctx.restore();
+  return { X, Y, L, T, pw, ph };
+}
+
+const sd = (d, M) => (d < M / 2 ? d : d - M);	/* signed Doppler bin */
+
+/* ---------------------------------------------------------------- state */
+let frame = null, dirty = false;
+let prev = null;
+const hist = [];		/* {t, dets:[[r,d,match]], truth} */
+const rateHist = [];	/* {t, checked, hits:[a,b]} */
+let lastFrameAt = 0;
+let nFrames = 0;
+
+function matchOf(det, truth) {
+  for (let k = 0; k < truth.length; k++)
+    if (Math.abs(det[0] - truth[k][0]) <= 1 && det[1] === truth[k][1]) return k;
+  return -1;
+}
+
+function onFrame(f) {
+  lastFrameAt = performance.now();
+  nFrames++;
+  const map = atob(f.map.data);
+  const q = new Uint8Array(map.length);
+  for (let i = 0; i < map.length; i++) q[i] = map.charCodeAt(i);
+  f.map.q = q;
+  f.dets.forEach((d) => (d.m = matchOf(d, f.truth)));
+  const t = f.stats.t;
+  if (hist.length && t < hist[hist.length - 1].t) { hist.length = 0; rateHist.length = 0; prev = null; }
+  hist.push({ t, dets: f.dets.map((d) => [d[0], d[1], d.m]), truth: f.truth });
+  while (hist.length && hist[0].t < t - HISTORY_S) hist.shift();
+  rateHist.push({ t, checked: f.stats.cpis_checked, hits: f.stats.hits.slice() });
+  while (rateHist.length && rateHist[0].t < t - HISTORY_S) rateHist.shift();
+  f.prev = prev;
+  prev = f;
+  frame = f;
+  dirty = true;
+}
+
+/* ---------------------------------------------------------------- stats */
+function stat(k, v, s, cls = "") {
+  return `<div class="stat"><div class="k">${k}</div><div class="v ${cls}">${v}</div><div class="s">${s}</div></div>`;
+}
+
+function drawStats(f) {
+  const st = f.stats, p = f.prev;
+  let msps = f.rate / 1e6, cpis = 0;
+  if (p && st.t > p.stats.t) {
+    const dt = st.t - p.stats.t;
+    msps = (st.words - p.stats.words) * 4 / dt / 1e6;
+    cpis = (f.cpi - p.cpi) / dt;
+  }
+  const ck = Math.max(1, st.cpis_checked);
+  const pct = (x) => (100 * x / ck).toFixed(2) + "%";
+  $("stats").innerHTML = [
+    stat("Sample rate", msps.toFixed(1) + " MS/s", `set ${(f.rate / 1e6).toFixed(1)} MS/s, ${(msps * 4 / 1000).toFixed(2)} GB/s`),
+    stat("CPIs processed", (f.cpi + 1).toLocaleString(), `${cpis.toFixed(0)} CPI/s, running ${fmtTime(st.t)}`),
+    stat("Samples lost", st.overflows.toLocaleString(), "FPGA ring overflows", st.overflows ? "bad" : "good"),
+    stat("Buffers overwritten", st.overruns.toLocaleString(), "before the GPU processed them", st.overruns ? "bad" : "good"),
+    stat("Latency", st.lat_p50.toFixed(3) + " ms", `CPI in GPU &rarr; detections, p99 ${st.lat_p99.toFixed(3)} ms`),
+    stat("Target A detected", pct(st.hits[0]), `${st.hits[0].toLocaleString()} of ${st.cpis_checked.toLocaleString()} CPIs`, st.hits[0] === st.cpis_checked ? "good" : ""),
+    stat("Target B detected", pct(st.hits[1]), `${st.hits[1].toLocaleString()} of ${st.cpis_checked.toLocaleString()} CPIs`, st.hits[1] === st.cpis_checked ? "good" : ""),
+    stat("Other detections", (st.false_alarms / ck).toFixed(2) + " /CPI", "range sidelobes + false alarms"),
+  ].join("");
+  $("cfg").textContent = `N=${f.N} range samples × M=${f.M} pulses per CPI, ${f.L}-sample chirp, noise σ=${f.noise} counts` +
+    (f.move ? `, targets moving ${f.move} range bins/s` : "") +
+    ` \u00b7 ${nFrames} frames received, ${hist.length ? (hist[hist.length - 1].t - hist[0].t).toFixed(0) : 0} s of history`;
+}
+
+function fmtTime(s) {
+  const m = Math.floor(s / 60), r = Math.floor(s % 60);
+  return m ? `${m}m ${String(r).padStart(2, "0")}s` : `${r}s`;
+}
+
+/* ----------------------------------------------------------- RD map */
+const off = document.createElement("canvas");
+function drawRD(f) {
+  const { ctx, w, h } = fit($("rd"));
+  const M = f.M, W = f.map.w;
+  const ax = axes(ctx, w, h, 0, f.nvalid, -M / 2, M / 2 - 1, "range bin", "Doppler bin", { xt: 10, yt: 8 });
+  off.width = W; off.height = M;
+  const octx = off.getContext("2d");
+  const img = octx.createImageData(W, M);
+  /*
+   * Each pixel is the max over several range bins, which lifts the noise;
+   * start the colours a few dB above the noise floor so targets stand out.
+   */
+  const floor = f.map.lo + 3, c0 = floor + 6, c1 = Math.max(f.map.hi, c0 + 10);
+  const cmap = new Uint8Array(256);
+  for (let k = 0; k < 256; k++) {
+    const db = f.map.lo + k / 255 * (f.map.hi - f.map.lo);
+    cmap[k] = Math.round(Math.min(1, Math.max(0, (db - c0) / (c1 - c0))) * 255);
+  }
+  for (let x = 0; x < W; x++)
+    for (let p = 0; p < M; p++) {
+      const v = cmap[f.map.q[x * M + p]];
+      const row = M / 2 - 1 - sd(p, M);
+      const o = (row * W + x) * 4;
+      img.data[o] = LUT[v * 3]; img.data[o + 1] = LUT[v * 3 + 1]; img.data[o + 2] = LUT[v * 3 + 2]; img.data[o + 3] = 255;
+    }
+  octx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, ax.L, ax.T, ax.pw, ax.ph);
+  /* outside the CFAR window */
+  ctx.fillStyle = "rgba(11,15,20,.55)";
+  ctx.fillRect(ax.L, ax.T, ax.X(f.r_begin) - ax.L, ax.ph);
+  ctx.fillRect(ax.X(f.r_end), ax.T, ax.L + ax.pw - ax.X(f.r_end), ax.ph);
+  const yOf = (d) => ax.Y(sd(d, M));
+  /* detections */
+  ctx.strokeStyle = "#ff3df5";
+  ctx.lineWidth = 1.5;
+  for (const d of f.dets) {
+    ctx.beginPath(); ctx.arc(ax.X(d[0]), yOf(d[1]), 6, 0, 2 * Math.PI); ctx.stroke();
+  }
+  /* truth */
+  f.truth.forEach((t, k) => {
+    const x = ax.X(t[0]), y = yOf(t[1]);
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+    ctx.strokeRect(x - 9, y - 9, 18, 18);
+    ctx.fillStyle = k ? COL.b : COL.a;
+    ctx.font = "600 12px system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText(k ? "B" : "A", x + 12, y - 8);
+  });
+  /* colour bar */
+  const cbx = ax.L + ax.pw - 130, cby = ax.T + 8;
+  for (let k = 0; k < 120; k++) {
+    const v = Math.round(k / 119 * 255);
+    ctx.fillStyle = `rgb(${LUT[v * 3]},${LUT[v * 3 + 1]},${LUT[v * 3 + 2]})`;
+    ctx.fillRect(cbx + k, cby, 1, 8);
+  }
+  ctx.fillStyle = "#fff"; ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "left";
+  ctx.fillText(`+${(c0 - floor).toFixed(0)}`, cbx, cby + 20);
+  ctx.textAlign = "right";
+  ctx.fillText(`+${(c1 - floor).toFixed(0)} dB`, cbx + 120, cby + 20);
+}
+
+/* ----------------------------------------------------- range profile */
+function drawProfile(f) {
+  const { ctx, w, h } = fit($("prof"));
+  const M = f.M, W = f.map.w, lo = f.map.lo, hi = f.map.hi;
+  const floor = lo + 3;
+  const ax = axes(ctx, w, h, 0, f.nvalid, 0, Math.ceil((hi - floor) / 10) * 10, "range bin", "dB above noise", { xt: 10 });
+  f.truth.forEach((t, k) => {
+    const p = t[1];
+    ctx.strokeStyle = k ? COL.b : COL.a;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let x = 0; x < W; x++) {
+      const db = lo + f.map.q[x * M + p] / 255 * (hi - lo) - floor;
+      const px = ax.X((x + 0.5) / W * f.nvalid), py = ax.Y(Math.max(0, db));
+      x ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.stroke();
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(ax.X(t[0]), ax.T); ctx.lineTo(ax.X(t[0]), ax.T + ax.ph); ctx.stroke();
+    ctx.setLineDash([]);
+  });
+}
+
+/* ----------------------------------------------------------- raw IQ */
+function drawIQ(f) {
+  const { ctx, w, h } = fit($("iq"));
+  const n = f.iq.length / 2, s0 = f.iq_start;
+  let m = 0;
+  for (const v of f.iq) m = Math.max(m, Math.abs(v));
+  m = Math.ceil(Math.max(m, 100) / 250) * 250;
+  const ax = axes(ctx, w, h, s0, s0 + n, -m, m, "sample within the pulse", "counts", { xt: 8 });
+  f.truth.forEach((t, k) => {
+    const a = Math.max(s0, t[0]), b = Math.min(s0 + n, t[0] + f.L);
+    if (b <= a) return;
+    ctx.fillStyle = k ? "rgba(79,179,255,.18)" : "rgba(255,138,61,.22)";
+    ctx.fillRect(ax.X(a), ax.T, ax.X(b) - ax.X(a), ax.ph);
+  });
+  for (const [c, o] of [[COL.i, 0], [COL.q, 1]]) {
+    ctx.strokeStyle = c; ctx.lineWidth = 1; ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      const px = ax.X(s0 + k), py = ax.Y(f.iq[2 * k + o]);
+      k ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.stroke();
+  }
+  const a = f.truth[0] ? f.truth[0][2] : 0;
+  $("iqnote").textContent = f.noise > 0
+    ? `Target A's echo (amplitude ${a} counts) is ${(20 * Math.log10(f.noise / Math.max(1, a))).toFixed(1)} dB below the noise (σ = ${f.noise}) here: invisible in the raw samples, it is found only after pulse compression and Doppler processing (~${(10 * Math.log10(f.L * f.M)).toFixed(0)} dB of gain).`
+    : "No noise: the chirp echoes are visible directly.";
+}
+
+function drawCon(f) {
+  const { ctx, w, h } = fit($("con"));
+  let m = 0;
+  for (const v of f.iq) m = Math.max(m, Math.abs(v));
+  m = Math.ceil(Math.max(m, 100) / 250) * 250;
+  const size = Math.min(w - 58, h - 38);
+  const ax = axes(ctx, size + 58, size + 38, -m, m, -m, m, "I", "Q", { xt: 4, yt: 4 });
+  ctx.fillStyle = "rgba(111,211,255,.55)";
+  for (let k = 0; k < f.iq.length; k += 2)
+    ctx.fillRect(ax.X(f.iq[k]) - 1, ax.Y(f.iq[k + 1]) - 1, 2, 2);
+  const ring = (r, c) => {
+    ctx.strokeStyle = c; ctx.lineWidth = 1.5; ctx.beginPath();
+    ctx.ellipse(ax.X(0), ax.Y(0), ax.X(r) - ax.X(0), ax.Y(0) - ax.Y(r), 0, 0, 2 * Math.PI); ctx.stroke();
+  };
+  if (f.noise > 0) ring(f.noise, "#9aa6b2");
+  if (f.truth[0]) ring(f.truth[0][2], COL.a);
+}
+
+/* ------------------------------------------------------- rate history */
+function drawRate() {
+  const { ctx, w, h } = fit($("rate"));
+  if (rateHist.length < 2) { ctx.clearRect(0, 0, w, h); return; }
+  const t1 = rateHist[rateHist.length - 1].t;
+  const ax0 = axes(ctx, w, h, -HISTORY_S, 0, 0, 110, "seconds ago", "% of CPIs", { xt: 4, yt: 5 });
+  const ax = { X: (t) => ax0.X(t - t1), Y: ax0.Y };
+  for (const k of [0, 1]) {
+    ctx.strokeStyle = k ? COL.b : COL.a; ctx.lineWidth = 2.5; ctx.beginPath();
+    let first = true;
+    for (let j = 1; j < rateHist.length; j++) {
+      const a = rateHist[Math.max(0, j - 15)], b = rateHist[j];
+      const dc = b.checked - a.checked;
+      if (dc <= 0) continue;
+      const y = 100 * (b.hits[k] - a.hits[k]) / dc;
+      const px = ax.X(b.t), py = ax.Y(Math.min(100, y)) + (k ? 2 : -2);
+      first ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      first = false;
+    }
+    ctx.stroke();
+  }
+}
+
+/* --------------------------------------------------- detection history */
+function drawHist(id, f, valOf, y0, y1, ylabel) {
+  const { ctx, w, h } = fit($(id));
+  if (!hist.length) { ctx.clearRect(0, 0, w, h); return; }
+  const t1 = hist[hist.length - 1].t;
+  const ax0 = axes(ctx, w, h, -HISTORY_S, 0, y0, y1, "seconds ago", ylabel, { xt: 6 });
+  const ax = { X: (t) => ax0.X(t - t1), Y: ax0.Y };
+  /* truth tracks */
+  for (const k of [0, 1]) {
+    ctx.strokeStyle = k ? "rgba(79,179,255,.45)" : "rgba(255,138,61,.45)";
+    ctx.lineWidth = 6; ctx.beginPath();
+    let last = null;
+    for (const e of hist) {
+      if (!e.truth[k]) continue;
+      const v = valOf(e.truth[k]);
+      const px = ax.X(e.t), py = ax.Y(v);
+      if (last === null || Math.abs(v - last) > (y1 - y0) / 4) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      last = v;
+    }
+    ctx.stroke();
+  }
+  for (const e of hist)
+    for (const d of e.dets) {
+      ctx.fillStyle = d[2] === 0 ? COL.a : d[2] === 1 ? COL.b : "rgba(138,150,163,.35)";
+      ctx.fillRect(ax.X(e.t) - 1.5, ax.Y(valOf(d)) - 1.5, 3, 3);
+    }
+}
+
+/* --------------------------------------------------------- table */
+function drawTable(f) {
+  const rows = f.dets.slice().sort((a, b) => b[3] - a[3]).slice(0, 14);
+  $("dets").innerHTML = rows.map((d) => {
+    const tag = d.m === 0 ? `<td class="tag" style="color:var(--a)">target A</td>`
+      : d.m === 1 ? `<td class="tag" style="color:var(--b)">target B</td>`
+      : `<td class="tag" style="color:var(--muted)">other</td>`;
+    return `<tr>${tag}<td>${d[0]}</td><td>${sd(d[1], f.M)}</td><td>${d[3].toFixed(1)}</td></tr>`;
+  }).join("");
+  const truth = f.truth.map((t, k) => `${k ? "B" : "A"}: range ${t[0]}, Doppler ${sd(t[1], f.M)}`).join("; ");
+  $("detnote").innerHTML = `CPI #${f.cpi.toLocaleString()}: ${f.ndets_total} detections (strongest shown). Truth &mdash; ${truth}.` +
+    (f.truth_valid ? "" : " <em>Targets moved during this CPI; not scored.</em>");
+}
+
+/* ----------------------------------------------------------- loop */
+function render() {
+  requestAnimationFrame(render);
+  if (!dirty || !frame) return;
+  dirty = false;
+  const f = frame;
+  drawStats(f);
+  drawRD(f);
+  drawTable(f);
+  drawProfile(f);
+  drawIQ(f);
+  drawCon(f);
+  drawRate();
+  drawHist("hr", f, (v) => v[0], 0, f.nvalid, "range bin");
+  drawHist("hd", f, (v) => sd(v[1], f.M), -f.M / 2, f.M / 2, "Doppler bin");
+}
+requestAnimationFrame(render);
+window.addEventListener("resize", () => (dirty = true));
+
+function setState(s) {
+  const el = $("state");
+  el.textContent = s === "live" ? "live" : s === "idle" ? "radar-bench not running" : "disconnected";
+  el.className = "pill " + (s === "live" ? "live" : "idle");
+}
+
+/* Long-poll the server for each next frame */
+async function poll() {
+  let seq = -1;
+  for (;;) {
+    try {
+      const r = await fetch(`frame?after=${seq}`, { cache: "no-store" });
+      seq = +(r.headers.get("X-Seq") || seq);
+      if (r.status === 200) {
+        onFrame(await r.json());
+        setState("live");
+      } else {
+        setState(r.headers.get("X-Producer") === "live" ? "live" : "idle");
+      }
+    } catch (e) {
+      setState("down");
+      await new Promise((ok) => setTimeout(ok, 1000));
+    }
+  }
+}
+poll();
+</script>
+</body>
+</html>
