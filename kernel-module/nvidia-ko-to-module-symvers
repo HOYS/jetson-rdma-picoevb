@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# Generate a Module.symvers-format file describing the nvidia_p2p_* symbols
+# exported by nvidia.ko, for use via KBUILD_EXTRA_SYMBOLS.
+#
+# usage: nvidia-ko-to-module-symvers nvidia.ko[.xz|.zst|.gz] output kernel-dir
+
+set -e
+
 syms=()
 syms+=(nvidia_p2p_init_mapping)
 syms+=(nvidia_p2p_destroy_mapping)
@@ -8,17 +15,59 @@ syms+=(nvidia_p2p_put_pages)
 syms+=(nvidia_p2p_free_page_table)
 syms+=(nvidia_p2p_dma_map_pages)
 syms+=(nvidia_p2p_dma_unmap_pages)
+syms+=(nvidia_p2p_free_dma_mapping)
 
 nvidia_ko_fn="$1"
 symvers_fn="$2"
+kdir="$3"
 
-touch "${symvers_fn}"
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "${tmpdir}"' EXIT
+
+# Distros may ship compressed modules
+ko="${tmpdir}/nvidia.ko"
+case "${nvidia_ko_fn}" in
+*.xz) xz -dc "${nvidia_ko_fn}" > "${ko}" ;;
+*.zst) zstd -dcq "${nvidia_ko_fn}" > "${ko}" ;;
+*.gz) gzip -dc "${nvidia_ko_fn}" > "${ko}" ;;
+*) cp "${nvidia_ko_fn}" "${ko}" ;;
+esac
+
+# The Module.symvers field order depends on kernel version:
+#   < 5.4:  crc symbol module export-type
+#   5.4-ish: crc symbol namespace module export-type
+#   later:  crc symbol module export-type namespace
+# Match whatever the target kernel's own Module.symvers uses.
+format=4
+if [ -f "${kdir}/Module.symvers" ]; then
+	format="$(awk -F'\t' 'NR == 1 {
+		for (i = 1; i <= NF; i++)
+			if ($i ~ /^EXPORT_SYMBOL/) { print NF ":" i; exit }
+	}' "${kdir}/Module.symvers")"
+fi
+
+: > "${symvers_fn}"
 for sym in "${syms[@]}"; do
-	crc="$(objdump -t "${nvidia_ko_fn}" | grep "__crc_${sym}" | awk '{print $1}')"
-	if [ -z "${crc}" ]; then
+	# objdump -t: "<value> <flags> <section>\t<size> <name>"
+	line="$(objdump -t "${ko}" | awk -v s="__crc_${sym}" '$NF == s' | head -1)"
+	if [ -z "${line}" ]; then
 		echo "Warning: Can't find symbol ${sym} in ${nvidia_ko_fn}; assuming CONFIG_MODVERSIONS=n so setting CRC=0"
 		crc=00000000
+	else
+		value="$(echo "${line}" | awk '{print $1}')"
+		section="$(echo "${line}" | cut -f1 | awk '{print $NF}')"
+		if [ "${section}" = "*ABS*" ]; then
+			# Before Linux 5.19, the CRC is the symbol's value
+			crc="${value: -8}"
+		else
+			# Since Linux 5.19, the CRC is stored at the symbol's address
+			objcopy -O binary --only-section="${section}" "${ko}" "${tmpdir}/crcs"
+			crc="$(od -An -tx4 -j "$((16#${value}))" -N4 "${tmpdir}/crcs" | tr -d ' \n')"
+		fi
 	fi
-	sed -i '/${sym}/d' "${symvers_fn}"
-	echo "0x${crc}	${sym}	${nvidia_ko_fn}	EXPORT_SYMBOL" >> ${symvers_fn}
+	case "${format}" in
+	5:5) printf '0x%s\t%s\t\tnvidia\tEXPORT_SYMBOL\n' "${crc}" "${sym}" ;;
+	5:4) printf '0x%s\t%s\tnvidia\tEXPORT_SYMBOL\t\n' "${crc}" "${sym}" ;;
+	*) printf '0x%s\t%s\tnvidia\tEXPORT_SYMBOL\n' "${crc}" "${sym}" ;;
+	esac >> "${symvers_fn}"
 done

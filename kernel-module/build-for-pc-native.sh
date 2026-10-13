@@ -20,17 +20,41 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+
 export NV_BUILD_DGPU=1
-export NVIDIA_SRC_DIR="$(find /usr/src/nvidia-* -name nv-p2p.h 2>/dev/null|head -1|xargs dirname 2>/dev/null)"
+
+# Prefer the headers and module of the NVIDIA driver that is actually loaded,
+# in case several driver versions are installed.
+nv_ver="$(cat /sys/module/nvidia/version 2>/dev/null || modinfo -F version nvidia 2>/dev/null || true)"
+export NVIDIA_SRC_DIR="$(find /usr/src/nvidia-${nv_ver}* -name nv-p2p.h 2>/dev/null|head -1|xargs dirname 2>/dev/null)"
 if [ ! -d "${NVIDIA_SRC_DIR}" ]; then
 	echo "ERROR: Could not find nv-p2p.h"
 	exit 1
 fi
 
-export NVIDIA_KO"=$(find /lib/modules/$(uname -r)/ -name 'nvidia*.ko'|grep -P 'nvidia(_[0-9]+)?.ko'|head -1)"
+export NVIDIA_KO="$(modinfo -n nvidia 2>/dev/null)"
+if [ ! -f "${NVIDIA_KO}" ]; then
+	export NVIDIA_KO="$(find /lib/modules/$(uname -r)/ -name 'nvidia*.ko*'|grep -P 'nvidia(_[0-9]+)?\.ko'|head -1)"
+fi
 if [ ! -f "${NVIDIA_KO}" ]; then
 	echo "ERROR: Could not find nvidia.ko"
 	exit 1
 fi
 
-exec make
+make || exit 1
+
+# The NVIDIA dGPU driver is proprietary, and Linux 5.13+ refuses to load a
+# module that uses both its symbols and EXPORT_SYMBOL_GPL symbols.
+kdir="${KDIR:-/lib/modules/$(uname -r)/build}"
+if [ -f "${kdir}/Module.symvers" ]; then
+	imports="$(mktemp)"
+	nm -u picoevb-rdma.ko | awk '{print $2}' | sort -u > "${imports}"
+	gpl="$(awk -F'\t' '/EXPORT_SYMBOL_GPL/ {print $2}' "${kdir}/Module.symvers" | sort -u | comm -12 - "${imports}")"
+	rm -f "${imports}"
+	if [ -n "${gpl}" ]; then
+		echo "ERROR: picoevb-rdma.ko uses GPL-only symbols, so will not load"
+		echo "alongside the proprietary nvidia.ko:"
+		echo "${gpl}"
+		exit 1
+	fi
+fi

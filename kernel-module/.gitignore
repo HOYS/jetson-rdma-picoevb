@@ -6,3 +6,4 @@
 *.o
 modules.order
 Module.symvers
+nvidia.symvers

@@ -14,12 +14,15 @@ KDIR ?= /lib/modules/$(shell uname -r)/build
 .PHONY: default
 default: modules
 
-%:
-	$(MAKE) -C "$(KDIR)" "M=$$PWD" "$@"
-
 ifdef NV_BUILD_DGPU
-modules: Module.symvers
+NVIDIA_SYMVERS := $(CURDIR)/nvidia.symvers
+KBUILD_ARGS := "KBUILD_EXTRA_SYMBOLS=$(NVIDIA_SYMVERS)"
 
-Module.symvers: $(NVIDIA_KO) nvidia-ko-to-module-symvers
-	./nvidia-ko-to-module-symvers "$<" "$@"
+modules: $(NVIDIA_SYMVERS)
+
+$(NVIDIA_SYMVERS): $(NVIDIA_KO) nvidia-ko-to-module-symvers
+	./nvidia-ko-to-module-symvers "$<" "$@" "$(KDIR)"
 endif
+
+%:
+	$(MAKE) -C "$(KDIR)" "M=$$PWD" $(KBUILD_ARGS) "$@"
